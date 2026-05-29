@@ -251,3 +251,63 @@ service_unset_quota() {
   service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
   rm -f "$PLUGIN_DATA_ROOT/$name/QUOTA_MB"
 }
+
+# Returns "<index_count> <total_bytes>" across the tenant's "<name>-*" indexes.
+# One GET /indexes + one GET /indexes/<uid>/stats per matching index.
+tenant_usage() {
+  local name="$1" count=0 total=0 uid st bytes
+  while IFS= read -r uid; do
+    [[ -z "$uid" ]] && continue
+    count=$((count + 1))
+    st="$(run_meilisearch_admin GET "/indexes/${uid}/stats")"
+    bytes="$(printf '%s' "$st" | grep -o '"rawDocumentDbSize":[0-9]*' | head -n1 | grep -o '[0-9]*$' || true)"
+    [[ -z "$bytes" ]] && bytes=0
+    total=$((total + bytes))
+  done < <(_tenant_index_uids "$name")
+  printf '%s %s\n' "$count" "$total"
+}
+
+# config:set the given key on every linked app. NO --no-restart: the running
+# app must restart to pick up the new MEILISEARCH_API_KEY (Meilisearch keys are
+# immutable, so enforcement = swapping which key the app holds).
+_apply_key_to_links() {
+  local name="$1" key="$2" links_file="$PLUGIN_DATA_ROOT/$name/LINKS" app
+  [[ -s "$links_file" ]] || return 0
+  while IFS= read -r app; do
+    [[ -z "$app" ]] && continue
+    dokku config:set "$app" "MEILISEARCH_API_KEY=$key"
+  done < "$links_file"
+}
+
+service_check_quota() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+
+  local quota_mb usage count bytes cap
+  quota_mb="$(service_get_quota_mb "$name")"
+  usage="$(tenant_usage "$name")"
+  count="${usage% *}"
+  bytes="${usage#* }"
+  [[ -z "$bytes" ]] && bytes=0
+  cap=$((quota_mb * 1024 * 1024))
+
+  local marker="$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED"
+
+  if [[ ! -f "$marker" ]]; then
+    if (( bytes > cap )); then
+      _apply_key_to_links "$name" "$(<"$PLUGIN_DATA_ROOT/$name/KEY_RO")"
+      : >"$marker"
+      printf 'flipped name=%s indexes=%s bytes=%s cap=%s -> read_only\n' \
+        "$name" "$count" "$bytes" "$cap"
+    fi
+  else
+    # Hysteresis: only release when comfortably under cap (< 90%) so an app
+    # hovering at the limit does not flap-restart every sweep.
+    if (( bytes * 10 < cap * 9 )); then
+      _apply_key_to_links "$name" "$(<"$PLUGIN_DATA_ROOT/$name/KEY_RW")"
+      rm -f "$marker"
+      printf 'released name=%s indexes=%s bytes=%s cap=%s -> writable\n' \
+        "$name" "$count" "$bytes" "$cap"
+    fi
+  fi
+}
