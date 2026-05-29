@@ -31,3 +31,66 @@ service_list() {
     printf '%s\n' "$name"
   done | sort
 }
+
+# Extract a top-level "<field>":"<string-value>" from a JSON blob. Good enough
+# for Meilisearch key responses (flat string fields). No jq dependency.
+json_field() {
+  local field="$1" json="$2"
+  printf '%s' "$json" \
+    | grep -o "\"$field\":\"[^\"]*\"" \
+    | head -n1 \
+    | sed 's/^"'"$field"'":"//; s/"$//'
+}
+
+# Run a Meilisearch REST call as the master (admin) key, executing curl INSIDE
+# the container via docker exec. All Meilisearch traffic routes through here so
+# the plugin never needs host curl and never depends on container-name DNS
+# resolving from the host. Usage: run_meilisearch_admin <METHOD> <path> [body]
+run_meilisearch_admin() {
+  local method="$1" path="$2" body="${3:-}"
+  local mk
+  mk="$(<"$PLUGIN_MASTER_KEY_FILE")"
+  if [[ -n "$body" ]]; then
+    docker exec -i "$PLUGIN_CONTAINER_NAME" \
+      curl -s -X "$method" \
+        -H "Authorization: Bearer $mk" \
+        -H "Content-Type: application/json" \
+        --data "$body" \
+        "http://localhost:${PLUGIN_DB_PORT}${path}"
+  else
+    docker exec -i "$PLUGIN_CONTAINER_NAME" \
+      curl -s -X "$method" \
+        -H "Authorization: Bearer $mk" \
+        "http://localhost:${PLUGIN_DB_PORT}${path}"
+  fi
+}
+
+# Make sure the shared Meilisearch container is up. Idempotent.
+ensure_shared_container() {
+  local existing
+  existing="$(docker ps --filter "name=^${PLUGIN_CONTAINER_NAME}$" --format '{{.Names}}' || true)"
+  if [[ -n "$existing" ]]; then
+    return 0
+  fi
+
+  docker network create "$PLUGIN_NETWORK_NAME" >/dev/null 2>&1 || true
+
+  if [[ ! -s "$PLUGIN_MASTER_KEY_FILE" ]]; then
+    mkdir -p "$(dirname "$PLUGIN_MASTER_KEY_FILE")"
+    generate_key >"$PLUGIN_MASTER_KEY_FILE"
+    chmod 600 "$PLUGIN_MASTER_KEY_FILE"
+  fi
+
+  local mk
+  mk="$(<"$PLUGIN_MASTER_KEY_FILE")"
+
+  docker run --detach \
+    --name "$PLUGIN_CONTAINER_NAME" \
+    --network "$PLUGIN_NETWORK_NAME" \
+    --restart always \
+    -e "MEILI_MASTER_KEY=$mk" \
+    -e "MEILI_ENV=production" \
+    -v "${PLUGIN_DATA_ROOT}/_meilidata:/meili_data" \
+    "${PLUGIN_IMAGE}:${PLUGIN_IMAGE_VERSION}" \
+    >/dev/null
+}
