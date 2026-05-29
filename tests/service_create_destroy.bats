@@ -85,3 +85,26 @@ create_demo() {
   [[ "$output" == *"MEILISEARCH_URL=http://dokku-shared-meilisearch:7700"* ]]
   [[ "$output" == *"MEILISEARCH_API_KEY=key_rw_token"* ]]
 }
+
+@test "service_destroy deletes both keys, matching indexes, and the data dir" {
+  create_demo
+  : >"$STUB_LOG"
+  # GET /indexes lists two demo indexes + one foreign index that must be skipped.
+  stub_response docker '{"results":[{"uid":"demo-products"},{"uid":"demo-orders"},{"uid":"other-data"}]}'
+  service_destroy "demo"
+  [[ ! -d "$PLUGIN_DATA_ROOT/demo" ]]
+  run grep -c 'curl .* -X DELETE .* http://localhost:7700/keys/uid-rw' "$STUB_LOG"
+  [[ "$output" -ge 1 ]]
+  run grep -c 'curl .* -X DELETE .* http://localhost:7700/keys/uid-ro' "$STUB_LOG"
+  [[ "$output" -ge 1 ]]
+  run grep -c 'http://localhost:7700/indexes/demo-products' "$STUB_LOG"
+  [[ "$output" -ge 1 ]]
+  run grep -c 'http://localhost:7700/indexes/other-data' "$STUB_LOG"
+  [[ "$output" == "0" ]]
+}
+
+@test "service_destroy errors when tenant is missing" {
+  run service_destroy "ghost"
+  [[ "$status" -ne 0 ]]
+  [[ "$output" == *"does not exist"* ]]
+}

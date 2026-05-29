@@ -146,3 +146,42 @@ service_create() {
   printf '%s' "${ro%% *}" >"$PLUGIN_DATA_ROOT/$name/KEY_RO_UID"
   chmod 600 "$PLUGIN_DATA_ROOT/$name"/KEY_*
 }
+
+# Echo the uids of all indexes whose name starts with "<name>-".
+_tenant_index_uids() {
+  local name="$1" json
+  json="$(run_meilisearch_admin GET "/indexes?limit=1000")"
+  printf '%s' "$json" \
+    | grep -o '"uid":"[^"]*"' \
+    | sed 's/^"uid":"//; s/"$//' \
+    | while IFS= read -r uid; do
+        [[ "$uid" == "${name}-"* ]] && printf '%s\n' "$uid"
+      done
+}
+
+service_destroy() {
+  local name="$1"
+  validate_name "$name" || { echo "invalid tenant name: $name" >&2; return 2; }
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+
+  local uid
+  if [[ -s "$PLUGIN_DATA_ROOT/$name/KEY_RW_UID" ]]; then
+    uid="$(<"$PLUGIN_DATA_ROOT/$name/KEY_RW_UID")"
+    run_meilisearch_admin DELETE "/keys/$uid" >/dev/null || true
+  fi
+  if [[ -s "$PLUGIN_DATA_ROOT/$name/KEY_RO_UID" ]]; then
+    uid="$(<"$PLUGIN_DATA_ROOT/$name/KEY_RO_UID")"
+    run_meilisearch_admin DELETE "/keys/$uid" >/dev/null || true
+  fi
+
+  local idx
+  while IFS= read -r idx; do
+    [[ -z "$idx" ]] && continue
+    run_meilisearch_admin DELETE "/indexes/$idx" >/dev/null || true
+  done < <(_tenant_index_uids "$name")
+
+  rm -rf "${PLUGIN_DATA_ROOT:?}/$name"
+}
