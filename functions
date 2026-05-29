@@ -138,7 +138,11 @@ service_create() {
 
   local rw ro
   rw="$(_create_scoped_key "$name" "$PLUGIN_RW_ACTIONS")" || { rm -rf "${PLUGIN_DATA_ROOT:?}/$name"; return 1; }
-  ro="$(_create_scoped_key "$name" "$PLUGIN_RO_ACTIONS")" || { rm -rf "${PLUGIN_DATA_ROOT:?}/$name"; return 1; }
+  ro="$(_create_scoped_key "$name" "$PLUGIN_RO_ACTIONS")" || {
+    run_meilisearch_admin DELETE "/keys/${rw%% *}" >/dev/null || true
+    rm -rf "${PLUGIN_DATA_ROOT:?}/$name"
+    return 1
+  }
 
   printf '%s' "${rw#* }" >"$PLUGIN_DATA_ROOT/$name/KEY_RW"
   printf '%s' "${rw%% *}" >"$PLUGIN_DATA_ROOT/$name/KEY_RW_UID"
@@ -155,7 +159,7 @@ _tenant_index_uids() {
     | grep -o '"uid":"[^"]*"' \
     | sed 's/^"uid":"//; s/"$//' \
     | while IFS= read -r uid; do
-        [[ "$uid" == "${name}-"* ]] && printf '%s\n' "$uid"
+        [[ "$uid" == "${name}-"* ]] && printf '%s\n' "$uid" || true
       done
 }
 

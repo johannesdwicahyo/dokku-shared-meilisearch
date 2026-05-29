@@ -36,6 +36,13 @@ setup() {
 
 # tenant_usage makes: GET /indexes, then GET /indexes/<uid>/stats per match.
 # Queue one /indexes listing + one stats blob per matching index.
+@test "tenant_usage returns 0 0 for a tenant with no indexes" {
+  stub_response docker '{"results":[]}'
+  run tenant_usage "demo"
+  [[ "$status" -eq 0 ]]
+  [[ "$output" == "0 0" ]]
+}
+
 @test "tenant_usage sums rawDocumentDbSize over matching indexes only" {
   stub_response docker '{"results":[{"uid":"demo-a"},{"uid":"demo-b"},{"uid":"other-c"}]}'
   stub_response docker '{"numberOfDocuments":3,"rawDocumentDbSize":1000,"isIndexing":false}'

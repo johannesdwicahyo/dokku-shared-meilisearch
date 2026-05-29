@@ -103,6 +103,14 @@ create_demo() {
   [[ "$output" == "0" ]]
 }
 
+@test "service_create cleans up local dir when key creation fails" {
+  stub_response docker 'dokku-shared-meilisearch'   # docker ps -> container up
+  stub_response docker '{}'                          # POST /keys -> no uid/key
+  run service_create "demo"
+  [[ "$status" -ne 0 ]]
+  [[ ! -d "$PLUGIN_DATA_ROOT/demo" ]]
+}
+
 @test "service_destroy errors when tenant is missing" {
   run service_destroy "ghost"
   [[ "$status" -ne 0 ]]
