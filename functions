@@ -311,3 +311,36 @@ service_check_quota() {
     fi
   fi
 }
+
+service_info() {
+  local name="$1"
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+
+  local usage count bytes quota_mb violated links_csv
+  usage="$(tenant_usage "$name")"
+  count="${usage% *}"
+  bytes="${usage#* }"
+  quota_mb="$(service_get_quota_mb "$name")"
+  violated="false"
+  [[ -f "$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED" ]] && violated="true"
+
+  if [[ -s "$PLUGIN_DATA_ROOT/$name/LINKS" ]]; then
+    links_csv="$(tr '\n' ',' <"$PLUGIN_DATA_ROOT/$name/LINKS")"
+    links_csv="${links_csv%,}"
+  else
+    links_csv=""
+  fi
+
+  printf 'name=%s\n'          "$name"
+  printf 'index_prefix=%s-\n' "$name"
+  printf 'host=%s\n'          "$PLUGIN_CONTAINER_NAME"
+  printf 'port=%s\n'          "$PLUGIN_DB_PORT"
+  printf 'index_count=%s\n'   "$count"
+  printf 'memory_bytes=%s\n'  "$bytes"
+  printf 'quota_mb=%s\n'      "$quota_mb"
+  printf 'read_only=%s\n'     "$violated"
+  printf 'linked_apps=%s\n'   "$links_csv"
+}
