@@ -1,0 +1,7 @@
+[plugin]
+name = "shared-meilisearch"
+description = "Dokku plugin: shared multi-tenant Meilisearch on a single host"
+version = "0.1.0"
+license = "MIT"
+
+[plugin.config]

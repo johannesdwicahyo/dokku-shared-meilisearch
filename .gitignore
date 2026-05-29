@@ -1,6 +1,5 @@
 # bats artefacts
 tests/.bats-tmp/
-tests/coverage/
 *.log
 
 # editor
