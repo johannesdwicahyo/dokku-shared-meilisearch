@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${DOKKU_TRACE:-}" == "1" ]] && set -x
+
+PLUGIN_ROOT="$(cd "$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")" && pwd)"
+# shellcheck source=config
+source "$PLUGIN_ROOT/config"
+# shellcheck source=functions
+source "$PLUGIN_ROOT/functions"
+
+shift || true
+
+name="${1:-}"
+flag="${2:-}"
+if [[ -z "$name" ]]; then
+  echo "usage: dokku $PLUGIN_COMMAND_PREFIX:connect <name> [--print-only]" >&2
+  exit 2
+fi
+if ! service_exists "$name"; then
+  echo "service does not exist: $name" >&2
+  exit 3
+fi
+
+key="$(<"$PLUGIN_DATA_ROOT/$name/KEY_RW")"
+url="$(service_url)"
+
+if [[ "$flag" == "--print-only" ]]; then
+  printf 'curl -H "Authorization: Bearer <redacted>" %s/indexes\n' "$url"
+  exit 0
+fi
+
+# Open an interactive shell inside the container with the tenant key + url
+# preset, so the operator can curl the API as the tenant.
+exec docker exec -it \
+  -e "MEILI_KEY=$key" \
+  -e "MEILI_URL=http://localhost:${PLUGIN_DB_PORT}" \
+  "$PLUGIN_CONTAINER_NAME" \
+  sh -c 'echo "tenant key in \$MEILI_KEY, base url \$MEILI_URL"; exec sh'

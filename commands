@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${DOKKU_TRACE:-}" == "1" ]] && set -x
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=config
+source "$PLUGIN_ROOT/config"
+
+cmd="${1:-}"
+
+case "$cmd" in
+  "$PLUGIN_COMMAND_PREFIX"|"$PLUGIN_COMMAND_PREFIX":*)  : ;;
+  help|"$PLUGIN_COMMAND_PREFIX":help)
+    exec "$PLUGIN_ROOT/subcommands/help" "$PLUGIN_COMMAND_PREFIX:help"
+    ;;
+  *) exit "${DOKKU_NOT_IMPLEMENTED_EXIT:-10}" ;;
+esac
+
+sub="${cmd#"$PLUGIN_COMMAND_PREFIX":}"
+[[ "$sub" == "$PLUGIN_COMMAND_PREFIX" ]] && sub="default"
+
+sub_script="$PLUGIN_ROOT/subcommands/$sub"
+if [[ ! -x "$sub_script" ]]; then
+  echo "shared-meilisearch: unknown subcommand: $sub" >&2
+  exit "${DOKKU_NOT_IMPLEMENTED_EXIT:-10}"
+fi
+
+exec "$sub_script" "$@"
