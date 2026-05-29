@@ -30,3 +30,58 @@ setup() {
   run grep -c '^docker run ' "$STUB_LOG"
   [[ "$output" == "0" ]]
 }
+
+# Queue: docker ps (container up) + two POST /keys responses (full, then ro).
+create_demo() {
+  stub_response docker 'dokku-shared-meilisearch'
+  stub_response docker '{"uid":"uid-rw","key":"key_rw_token","actions":["search"],"indexes":["demo-*"]}'
+  stub_response docker '{"uid":"uid-ro","key":"key_ro_token","actions":["search"],"indexes":["demo-*"]}'
+  service_create "demo"
+}
+
+@test "service_create stores both key tokens and uids" {
+  create_demo
+  [[ "$(<"$PLUGIN_DATA_ROOT/demo/KEY_RW")"     == "key_rw_token" ]]
+  [[ "$(<"$PLUGIN_DATA_ROOT/demo/KEY_RW_UID")" == "uid-rw" ]]
+  [[ "$(<"$PLUGIN_DATA_ROOT/demo/KEY_RO")"     == "key_ro_token" ]]
+  [[ "$(<"$PLUGIN_DATA_ROOT/demo/KEY_RO_UID")" == "uid-ro" ]]
+  [[ -f "$PLUGIN_DATA_ROOT/demo/LINKS" ]]
+}
+
+@test "service_create posts two keys scoped to the tenant prefix" {
+  create_demo
+  posts=()
+  while IFS= read -r line; do posts+=("$line"); done < <(grep 'curl .* http://localhost:7700/keys' "$STUB_LOG")
+  [[ "${#posts[@]}" -eq 2 ]]
+  # full key (first) carries write actions; both scope indexes to "demo-*"
+  [[ "${posts[0]}" == *'"indexes":["demo-*"]'* ]]
+  [[ "${posts[0]}" == *'documents.add'* ]]
+  [[ "${posts[1]}" == *'"indexes":["demo-*"]'* ]]
+  # read-only key (second) must NOT grant document writes
+  [[ "${posts[1]}" != *'documents.add'* ]]
+  [[ "${posts[1]}" == *'"search"'* ]]
+}
+
+@test "service_create refuses an existing tenant" {
+  create_demo
+  run service_create "demo"
+  [[ "$status" -ne 0 ]]
+  [[ "$output" == *"already exists"* ]]
+}
+
+@test "service_create rejects invalid names" {
+  run service_create "BadName"
+  [[ "$status" -ne 0 ]]
+  run service_create "has-hyphen"
+  [[ "$status" -ne 0 ]]
+  run service_create ""
+  [[ "$status" -ne 0 ]]
+}
+
+@test "service_connection_info prints url and full key" {
+  create_demo
+  run service_connection_info "demo"
+  [[ "$status" -eq 0 ]]
+  [[ "$output" == *"MEILISEARCH_URL=http://dokku-shared-meilisearch:7700"* ]]
+  [[ "$output" == *"MEILISEARCH_API_KEY=key_rw_token"* ]]
+}

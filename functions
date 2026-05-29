@@ -94,3 +94,55 @@ ensure_shared_container() {
     "${PLUGIN_IMAGE}:${PLUGIN_IMAGE_VERSION}" \
     >/dev/null
 }
+
+# Action sets for the two per-tenant keys. The full key deliberately excludes
+# keys.* (a tenant must never mint keys) and dumps/snapshots (host-level).
+PLUGIN_RW_ACTIONS='"search","documents.add","documents.get","documents.delete","indexes.create","indexes.get","indexes.update","indexes.delete","settings.get","settings.update","stats.get","tasks.get"'
+PLUGIN_RO_ACTIONS='"search","documents.get","indexes.get","stats.get"'
+
+service_url() {
+  printf 'http://%s:%s\n' "$PLUGIN_CONTAINER_NAME" "$PLUGIN_DB_PORT"
+}
+
+# Print the env lines a linked app needs. Used by create + connect.
+service_connection_info() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  printf 'MEILISEARCH_URL=%s\n' "$(service_url)"
+  printf 'MEILISEARCH_API_KEY=%s\n' "$(<"$PLUGIN_DATA_ROOT/$name/KEY_RW")"
+}
+
+# POST a scoped key; echo "<uid> <key>". indexes scoped to "<name>-*".
+_create_scoped_key() {
+  local name="$1" actions="$2"
+  local resp uid key
+  resp="$(run_meilisearch_admin POST /keys \
+    '{"actions":['"$actions"'],"indexes":["'"$name"'-*"],"expiresAt":null}')"
+  uid="$(json_field uid "$resp")"
+  key="$(json_field key "$resp")"
+  [[ -n "$uid" && -n "$key" ]] || { echo "meilisearch key creation failed: $resp" >&2; return 1; }
+  printf '%s %s\n' "$uid" "$key"
+}
+
+service_create() {
+  local name="$1"
+  validate_name "$name" || { echo "invalid tenant name: $name" >&2; return 2; }
+  if service_exists "$name"; then
+    echo "service already exists: $name" >&2
+    return 3
+  fi
+  ensure_shared_container
+
+  mkdir -p "$PLUGIN_DATA_ROOT/$name"
+  : >"$PLUGIN_DATA_ROOT/$name/LINKS"
+
+  local rw ro
+  rw="$(_create_scoped_key "$name" "$PLUGIN_RW_ACTIONS")" || { rm -rf "${PLUGIN_DATA_ROOT:?}/$name"; return 1; }
+  ro="$(_create_scoped_key "$name" "$PLUGIN_RO_ACTIONS")" || { rm -rf "${PLUGIN_DATA_ROOT:?}/$name"; return 1; }
+
+  printf '%s' "${rw#* }" >"$PLUGIN_DATA_ROOT/$name/KEY_RW"
+  printf '%s' "${rw%% *}" >"$PLUGIN_DATA_ROOT/$name/KEY_RW_UID"
+  printf '%s' "${ro#* }" >"$PLUGIN_DATA_ROOT/$name/KEY_RO"
+  printf '%s' "${ro%% *}" >"$PLUGIN_DATA_ROOT/$name/KEY_RO_UID"
+  chmod 600 "$PLUGIN_DATA_ROOT/$name"/KEY_*
+}
