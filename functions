@@ -271,7 +271,8 @@ tenant_usage() {
 # app must restart to pick up the new MEILISEARCH_API_KEY (Meilisearch keys are
 # immutable, so enforcement = swapping which key the app holds).
 _apply_key_to_links() {
-  local name="$1" key="$2" links_file="$PLUGIN_DATA_ROOT/$name/LINKS" app
+  local name="$1" key="$2" app
+  local links_file="$PLUGIN_DATA_ROOT/$name/LINKS"
   [[ -s "$links_file" ]] || return 0
   while IFS= read -r app; do
     [[ -z "$app" ]] && continue
@@ -343,4 +344,22 @@ service_info() {
   printf 'quota_mb=%s\n'      "$quota_mb"
   printf 'read_only=%s\n'     "$violated"
   printf 'linked_apps=%s\n'   "$links_csv"
+}
+
+# Per-tenant export/import is a v0.2 stretch goal — see CLAUDE.md. Meilisearch
+# dumps/snapshots are instance-wide (not per-tenant), so a correct per-tenant
+# implementation needs document-level export scoped to "<name>-*" indexes.
+# These stubs keep the CLI surface stable until that lands.
+service_export() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  echo "shared-meilisearch:export is not implemented in v0.1.0 (per-tenant backup is a v0.2 stretch goal); use a host-level Meilisearch snapshot for now" >&2
+  return 1
+}
+
+service_import() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  echo "shared-meilisearch:import is not implemented in v0.1.0 (per-tenant backup is a v0.2 stretch goal)" >&2
+  return 1
 }
