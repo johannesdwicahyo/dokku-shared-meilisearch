@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Plugin identity
+PLUGIN_COMMAND_PREFIX="shared-meilisearch"
+PLUGIN_SERVICE="shared-meilisearch"
+
+# Shared Meilisearch container. Pin a concrete tag (confirm latest stable v1
+# on Docker Hub at build time); never :latest.
+PLUGIN_IMAGE="getmeili/meilisearch"
+PLUGIN_IMAGE_VERSION="v1.15"
+PLUGIN_CONTAINER_NAME="dokku-shared-meilisearch"
+PLUGIN_NETWORK_NAME="dokku-shared-meilisearch"
+PLUGIN_DB_PORT="7700"
+
+# Filesystem layout (overrideable for tests)
+PLUGIN_DATA_ROOT="${PLUGIN_DATA_ROOT:-/var/lib/dokku/services/shared-meilisearch}"
+PLUGIN_MASTER_KEY_FILE="${PLUGIN_DATA_ROOT}/.master_key"
+
+# Per-tenant default size cap (MB).
+PLUGIN_DEFAULT_QUOTA_MB="${PLUGIN_DEFAULT_QUOTA_MB:-100}"
+
+# Tenant name validation. Lowercase alpha start, [a-z0-9_], 1..31 chars.
+# Hyphen is FORBIDDEN: the index separator is '-' and Meilisearch key index
+# patterns are pure prefix matches ("foo-*" matches anything starting "foo-").
+# Allowing a name like "foo-bar" would let tenant "foo"'s "foo-*" key read
+# "foo-bar"'s indexes -> cross-tenant leak. Excluding '-' keeps the separator
+# unambiguous.
+PLUGIN_NAME_REGEX='^[a-z][a-z0-9_]{0,30}$'
+
+export PLUGIN_COMMAND_PREFIX PLUGIN_SERVICE \
+       PLUGIN_IMAGE PLUGIN_IMAGE_VERSION \
+       PLUGIN_CONTAINER_NAME PLUGIN_NETWORK_NAME PLUGIN_DB_PORT \
+       PLUGIN_DATA_ROOT PLUGIN_MASTER_KEY_FILE \
+       PLUGIN_DEFAULT_QUOTA_MB PLUGIN_NAME_REGEX
