@@ -201,8 +201,16 @@ service_link() {
     return 2
   fi
 
+  # Hand the app the key that matches the tenant's CURRENT quota state. If the
+  # tenant is throttled (QUOTA_VIOLATED), a freshly linked app must get the
+  # read-only key too — otherwise it would slip past enforcement until the next
+  # release/re-violate cycle. The release sweep restores KEY_RW to all links.
   local key
-  key="$(<"$PLUGIN_DATA_ROOT/$name/KEY_RW")"
+  if [[ -f "$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED" ]]; then
+    key="$(<"$PLUGIN_DATA_ROOT/$name/KEY_RO")"
+  else
+    key="$(<"$PLUGIN_DATA_ROOT/$name/KEY_RW")"
+  fi
   dokku config:set --no-restart "$app" \
     "MEILISEARCH_URL=$(service_url)" \
     "MEILISEARCH_API_KEY=$key"

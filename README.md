@@ -68,9 +68,11 @@ client.index("my-search-products").add_documents([{"id": 1, "title": "Hello"}])
 - **Two API keys per tenant**, both scoped to `<name>-*`: a full-CRUD key (used by linked apps) and a read-only key (used during quota enforcement). Both are stable for the tenant's lifetime.
 - **`link`** sets `MEILISEARCH_URL=http://dokku-shared-meilisearch:7700` and `MEILISEARCH_API_KEY=<full key>` on the app.
 
+> **Networking:** `MEILISEARCH_URL` uses the container hostname `dokku-shared-meilisearch`, which only resolves for containers attached to the `dokku-shared-meilisearch` Docker network. Ensure your linked app's containers join that network (e.g. via `dokku docker-options` or your platform's shared-network wiring).
+
 ## Quotas
 
-One size cap per tenant (MB). Default: **100 MB**. The cron job runs `dokku shared-meilisearch:check-quotas` every 5 minutes, summing each tenant's `<name>-*` index sizes.
+One size cap per tenant (MB). Default: **100 MB**. The cron job runs `dokku shared-meilisearch:check-quotas` every 5 minutes, summing each tenant's `<name>-*` index sizes (via each index's `rawDocumentDbSize`; this counts document data, so actual on-disk usage including search structures runs somewhat higher).
 
 **When a tenant exceeds its cap, its linked apps are switched to the read-only key and restarted** — search keeps working, writes return `403`. When usage drops comfortably below the cap (under 90%, a hysteresis margin to avoid flap-restarts), the full key is restored and the apps restart again.
 

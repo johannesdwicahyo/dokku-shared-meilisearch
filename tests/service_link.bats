@@ -15,6 +15,13 @@ setup() {
   assert_stub_called_with dokku "config:set --no-restart myapp MEILISEARCH_URL=http://dokku-shared-meilisearch:7700 MEILISEARCH_API_KEY=key_rw_token"
 }
 
+@test "service_link hands a throttled tenant's app the read-only key" {
+  printf 'key_ro_token' >"$PLUGIN_DATA_ROOT/demo/KEY_RO"
+  : >"$PLUGIN_DATA_ROOT/demo/QUOTA_VIOLATED"
+  service_link "demo" "myapp"
+  assert_stub_called_with dokku "config:set --no-restart myapp MEILISEARCH_URL=http://dokku-shared-meilisearch:7700 MEILISEARCH_API_KEY=key_ro_token"
+}
+
 @test "service_link records the app in LINKS" {
   service_link "demo" "myapp"
   run cat "$PLUGIN_DATA_ROOT/demo/LINKS"
