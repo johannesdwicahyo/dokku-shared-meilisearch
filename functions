@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+# Shared helpers for shared-meilisearch. Sourced — never executed directly.
+set -euo pipefail
+
+# 16 random bytes -> 32 hex chars. Used for the master key. No openssl dep.
+generate_key() {
+  od -An -tx1 -N16 /dev/urandom | tr -d ' \n'
+}
+
+validate_name() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || return 1
+  [[ "$name" =~ $PLUGIN_NAME_REGEX ]] || return 1
+}
+
+service_exists() {
+  local name="$1"
+  [[ -d "$PLUGIN_DATA_ROOT/$name" ]]
+}
+
+service_list() {
+  [[ -d "$PLUGIN_DATA_ROOT" ]] || return 0
+  local d
+  for d in "$PLUGIN_DATA_ROOT"/*/; do
+    [[ -d "$d" ]] || continue
+    local name="${d%/}"
+    name="${name##*/}"
+    [[ "$name" == .* ]] && continue
+    # `_meilidata` is the container's data volume; `_`-prefixed is reserved.
+    [[ "$name" == _* ]] && continue
+    printf '%s\n' "$name"
+  done | sort
+}
+
+# Extract a top-level "<field>":"<string-value>" from a JSON blob. Good enough
+# for Meilisearch key responses (flat string fields). No jq dependency.
+json_field() {
+  local field="$1" json="$2"
+  printf '%s' "$json" \
+    | grep -o "\"$field\":\"[^\"]*\"" \
+    | head -n1 \
+    | sed 's/^"'"$field"'":"//; s/"$//'
+}
+
+# Run a Meilisearch REST call as the master (admin) key, executing curl INSIDE
+# the container via docker exec. All Meilisearch traffic routes through here so
+# the plugin never needs host curl and never depends on container-name DNS
+# resolving from the host. Usage: run_meilisearch_admin <METHOD> <path> [body]
+run_meilisearch_admin() {
+  local method="$1" path="$2" body="${3:-}"
+  local mk
+  mk="$(<"$PLUGIN_MASTER_KEY_FILE")"
+  if [[ -n "$body" ]]; then
+    docker exec -i "$PLUGIN_CONTAINER_NAME" \
+      curl -s -X "$method" \
+        -H "Authorization: Bearer $mk" \
+        -H "Content-Type: application/json" \
+        --data "$body" \
+        "http://localhost:${PLUGIN_DB_PORT}${path}"
+  else
+    docker exec -i "$PLUGIN_CONTAINER_NAME" \
+      curl -s -X "$method" \
+        -H "Authorization: Bearer $mk" \
+        "http://localhost:${PLUGIN_DB_PORT}${path}"
+  fi
+}
+
+# Make sure the shared Meilisearch container is up. Idempotent.
+ensure_shared_container() {
+  local existing
+  existing="$(docker ps --filter "name=^${PLUGIN_CONTAINER_NAME}$" --format '{{.Names}}' || true)"
+  if [[ -n "$existing" ]]; then
+    return 0
+  fi
+
+  docker network create "$PLUGIN_NETWORK_NAME" >/dev/null 2>&1 || true
+
+  if [[ ! -s "$PLUGIN_MASTER_KEY_FILE" ]]; then
+    mkdir -p "$(dirname "$PLUGIN_MASTER_KEY_FILE")"
+    generate_key >"$PLUGIN_MASTER_KEY_FILE"
+    chmod 600 "$PLUGIN_MASTER_KEY_FILE"
+  fi
+
+  local mk
+  mk="$(<"$PLUGIN_MASTER_KEY_FILE")"
+
+  docker run --detach \
+    --name "$PLUGIN_CONTAINER_NAME" \
+    --network "$PLUGIN_NETWORK_NAME" \
+    --restart always \
+    -e "MEILI_MASTER_KEY=$mk" \
+    -e "MEILI_ENV=production" \
+    -v "${PLUGIN_DATA_ROOT}/_meilidata:/meili_data" \
+    "${PLUGIN_IMAGE}:${PLUGIN_IMAGE_VERSION}" \
+    >/dev/null
+}
+
+# Action sets for the two per-tenant keys. The full key deliberately excludes
+# keys.* (a tenant must never mint keys) and dumps/snapshots (host-level).
+PLUGIN_RW_ACTIONS='"search","documents.add","documents.get","documents.delete","indexes.create","indexes.get","indexes.update","indexes.delete","settings.get","settings.update","stats.get","tasks.get"'
+PLUGIN_RO_ACTIONS='"search","documents.get","indexes.get","stats.get"'
+
+service_url() {
+  printf 'http://%s:%s\n' "$PLUGIN_CONTAINER_NAME" "$PLUGIN_DB_PORT"
+}
+
+# Print the env lines a linked app needs. Used by create + connect.
+service_connection_info() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  printf 'MEILISEARCH_URL=%s\n' "$(service_url)"
+  printf 'MEILISEARCH_API_KEY=%s\n' "$(<"$PLUGIN_DATA_ROOT/$name/KEY_RW")"
+}
+
+# POST a scoped key; echo "<uid> <key>". indexes scoped to "<name>-*".
+_create_scoped_key() {
+  local name="$1" actions="$2"
+  local resp uid key
+  resp="$(run_meilisearch_admin POST /keys \
+    '{"actions":['"$actions"'],"indexes":["'"$name"'-*"],"expiresAt":null}')"
+  uid="$(json_field uid "$resp")"
+  key="$(json_field key "$resp")"
+  [[ -n "$uid" && -n "$key" ]] || { echo "meilisearch key creation failed: $resp" >&2; return 1; }
+  printf '%s %s\n' "$uid" "$key"
+}
+
+service_create() {
+  local name="$1"
+  validate_name "$name" || { echo "invalid tenant name: $name" >&2; return 2; }
+  if service_exists "$name"; then
+    echo "service already exists: $name" >&2
+    return 3
+  fi
+  ensure_shared_container
+
+  mkdir -p "$PLUGIN_DATA_ROOT/$name"
+  : >"$PLUGIN_DATA_ROOT/$name/LINKS"
+
+  local rw ro
+  rw="$(_create_scoped_key "$name" "$PLUGIN_RW_ACTIONS")" || { rm -rf "${PLUGIN_DATA_ROOT:?}/$name"; return 1; }
+  ro="$(_create_scoped_key "$name" "$PLUGIN_RO_ACTIONS")" || {
+    run_meilisearch_admin DELETE "/keys/${rw%% *}" >/dev/null || true
+    rm -rf "${PLUGIN_DATA_ROOT:?}/$name"
+    return 1
+  }
+
+  printf '%s' "${rw#* }" >"$PLUGIN_DATA_ROOT/$name/KEY_RW"
+  printf '%s' "${rw%% *}" >"$PLUGIN_DATA_ROOT/$name/KEY_RW_UID"
+  printf '%s' "${ro#* }" >"$PLUGIN_DATA_ROOT/$name/KEY_RO"
+  printf '%s' "${ro%% *}" >"$PLUGIN_DATA_ROOT/$name/KEY_RO_UID"
+  chmod 600 "$PLUGIN_DATA_ROOT/$name"/KEY_*
+}
+
+# Echo the uids of all indexes whose name starts with "<name>-".
+_tenant_index_uids() {
+  local name="$1" json
+  json="$(run_meilisearch_admin GET "/indexes?limit=1000")"
+  printf '%s' "$json" \
+    | grep -o '"uid":"[^"]*"' \
+    | sed 's/^"uid":"//; s/"$//' \
+    | while IFS= read -r uid; do
+        [[ "$uid" == "${name}-"* ]] && printf '%s\n' "$uid" || true
+      done
+}
+
+service_destroy() {
+  local name="$1"
+  validate_name "$name" || { echo "invalid tenant name: $name" >&2; return 2; }
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+
+  local uid
+  if [[ -s "$PLUGIN_DATA_ROOT/$name/KEY_RW_UID" ]]; then
+    uid="$(<"$PLUGIN_DATA_ROOT/$name/KEY_RW_UID")"
+    run_meilisearch_admin DELETE "/keys/$uid" >/dev/null || true
+  fi
+  if [[ -s "$PLUGIN_DATA_ROOT/$name/KEY_RO_UID" ]]; then
+    uid="$(<"$PLUGIN_DATA_ROOT/$name/KEY_RO_UID")"
+    run_meilisearch_admin DELETE "/keys/$uid" >/dev/null || true
+  fi
+
+  local idx
+  while IFS= read -r idx; do
+    [[ -z "$idx" ]] && continue
+    run_meilisearch_admin DELETE "/indexes/$idx" >/dev/null || true
+  done < <(_tenant_index_uids "$name")
+
+  rm -rf "${PLUGIN_DATA_ROOT:?}/$name"
+}
+
+service_link() {
+  local name="$1" app="${2:-}"
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+  if [[ -z "$app" ]]; then
+    echo "app name required" >&2
+    return 2
+  fi
+
+  # Hand the app the key that matches the tenant's CURRENT quota state. If the
+  # tenant is throttled (QUOTA_VIOLATED), a freshly linked app must get the
+  # read-only key too — otherwise it would slip past enforcement until the next
+  # release/re-violate cycle. The release sweep restores KEY_RW to all links.
+  local key
+  if [[ -f "$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED" ]]; then
+    key="$(<"$PLUGIN_DATA_ROOT/$name/KEY_RO")"
+  else
+    key="$(<"$PLUGIN_DATA_ROOT/$name/KEY_RW")"
+  fi
+  dokku config:set --no-restart "$app" \
+    "MEILISEARCH_URL=$(service_url)" \
+    "MEILISEARCH_API_KEY=$key"
+
+  local links_file="$PLUGIN_DATA_ROOT/$name/LINKS"
+  if ! grep -qx "$app" "$links_file" 2>/dev/null; then
+    printf '%s\n' "$app" >>"$links_file"
+  fi
+}
+
+service_unlink() {
+  local name="$1" app="${2:-}"
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+  if [[ -z "$app" ]]; then
+    echo "app name required" >&2
+    return 2
+  fi
+
+  dokku config:unset --no-restart "$app" MEILISEARCH_URL MEILISEARCH_API_KEY || true
+
+  local links_file="$PLUGIN_DATA_ROOT/$name/LINKS"
+  if [[ -f "$links_file" ]]; then
+    grep -vx "$app" "$links_file" >"${links_file}.tmp" || true
+    mv "${links_file}.tmp" "$links_file"
+  fi
+}
+
+service_get_quota_mb() {
+  local name="$1"
+  local f="$PLUGIN_DATA_ROOT/$name/QUOTA_MB"
+  if [[ -s "$f" ]]; then
+    cat "$f"
+  else
+    printf '%s' "$PLUGIN_DEFAULT_QUOTA_MB"
+  fi
+}
+
+service_set_quota() {
+  local name="$1" mb="${2:-}"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  [[ "$mb" =~ ^[1-9][0-9]*$ ]] || { echo "quota mb must be a positive integer: $mb" >&2; return 2; }
+  printf '%s' "$mb" >"$PLUGIN_DATA_ROOT/$name/QUOTA_MB"
+}
+
+service_unset_quota() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  rm -f "$PLUGIN_DATA_ROOT/$name/QUOTA_MB"
+}
+
+# Returns "<index_count> <total_bytes>" across the tenant's "<name>-*" indexes.
+# One GET /indexes + one GET /indexes/<uid>/stats per matching index.
+tenant_usage() {
+  local name="$1" count=0 total=0 uid st bytes
+  while IFS= read -r uid; do
+    [[ -z "$uid" ]] && continue
+    count=$((count + 1))
+    st="$(run_meilisearch_admin GET "/indexes/${uid}/stats")"
+    bytes="$(printf '%s' "$st" | grep -o '"rawDocumentDbSize":[0-9]*' | head -n1 | grep -o '[0-9]*$' || true)"
+    [[ -z "$bytes" ]] && bytes=0
+    total=$((total + bytes))
+  done < <(_tenant_index_uids "$name")
+  printf '%s %s\n' "$count" "$total"
+}
+
+# config:set the given key on every linked app. NO --no-restart: the running
+# app must restart to pick up the new MEILISEARCH_API_KEY (Meilisearch keys are
+# immutable, so enforcement = swapping which key the app holds).
+_apply_key_to_links() {
+  local name="$1" key="$2" app
+  local links_file="$PLUGIN_DATA_ROOT/$name/LINKS"
+  [[ -s "$links_file" ]] || return 0
+  while IFS= read -r app; do
+    [[ -z "$app" ]] && continue
+    dokku config:set "$app" "MEILISEARCH_API_KEY=$key"
+  done < "$links_file"
+}
+
+service_check_quota() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+
+  local quota_mb usage count bytes cap
+  quota_mb="$(service_get_quota_mb "$name")"
+  usage="$(tenant_usage "$name")"
+  count="${usage% *}"
+  bytes="${usage#* }"
+  [[ -z "$bytes" ]] && bytes=0
+  cap=$((quota_mb * 1024 * 1024))
+
+  local marker="$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED"
+
+  if [[ ! -f "$marker" ]]; then
+    if (( bytes > cap )); then
+      _apply_key_to_links "$name" "$(<"$PLUGIN_DATA_ROOT/$name/KEY_RO")"
+      : >"$marker"
+      printf 'flipped name=%s indexes=%s bytes=%s cap=%s -> read_only\n' \
+        "$name" "$count" "$bytes" "$cap"
+    fi
+  else
+    # Hysteresis: only release when comfortably under cap (< 90%) so an app
+    # hovering at the limit does not flap-restart every sweep.
+    if (( bytes * 10 < cap * 9 )); then
+      _apply_key_to_links "$name" "$(<"$PLUGIN_DATA_ROOT/$name/KEY_RW")"
+      rm -f "$marker"
+      printf 'released name=%s indexes=%s bytes=%s cap=%s -> writable\n' \
+        "$name" "$count" "$bytes" "$cap"
+    fi
+  fi
+}
+
+service_info() {
+  local name="$1"
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+
+  local usage count bytes quota_mb violated links_csv
+  usage="$(tenant_usage "$name")"
+  count="${usage% *}"
+  bytes="${usage#* }"
+  quota_mb="$(service_get_quota_mb "$name")"
+  violated="false"
+  [[ -f "$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED" ]] && violated="true"
+
+  if [[ -s "$PLUGIN_DATA_ROOT/$name/LINKS" ]]; then
+    links_csv="$(tr '\n' ',' <"$PLUGIN_DATA_ROOT/$name/LINKS")"
+    links_csv="${links_csv%,}"
+  else
+    links_csv=""
+  fi
+
+  printf 'name=%s\n'          "$name"
+  printf 'index_prefix=%s-\n' "$name"
+  printf 'host=%s\n'          "$PLUGIN_CONTAINER_NAME"
+  printf 'port=%s\n'          "$PLUGIN_DB_PORT"
+  printf 'index_count=%s\n'   "$count"
+  printf 'memory_bytes=%s\n'  "$bytes"
+  printf 'quota_mb=%s\n'      "$quota_mb"
+  printf 'read_only=%s\n'     "$violated"
+  printf 'linked_apps=%s\n'   "$links_csv"
+}
+
+# Per-tenant export/import is a v0.2 stretch goal — see CLAUDE.md. Meilisearch
+# dumps/snapshots are instance-wide (not per-tenant), so a correct per-tenant
+# implementation needs document-level export scoped to "<name>-*" indexes.
+# These stubs keep the CLI surface stable until that lands.
+service_export() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  echo "shared-meilisearch:export is not implemented in v0.1.0 (per-tenant backup is a v0.2 stretch goal); use a host-level Meilisearch snapshot for now" >&2
+  return 1
+}
+
+service_import() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  echo "shared-meilisearch:import is not implemented in v0.1.0 (per-tenant backup is a v0.2 stretch goal)" >&2
+  return 1
+}

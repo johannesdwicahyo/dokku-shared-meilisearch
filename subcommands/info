@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${DOKKU_TRACE:-}" == "1" ]] && set -x
+
+PLUGIN_ROOT="$(cd "$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")" && pwd)"
+# shellcheck source=config
+source "$PLUGIN_ROOT/config"
+# shellcheck source=functions
+source "$PLUGIN_ROOT/functions"
+
+shift || true
+
+name="${1:-}"
+if [[ -z "$name" ]]; then
+  echo "usage: dokku $PLUGIN_COMMAND_PREFIX:info <name>" >&2
+  exit 2
+fi
+if ! service_exists "$name"; then
+  echo "service does not exist: $name" >&2
+  exit 3
+fi
+
+i_name="" i_index_prefix="" i_host="" i_port=""
+i_index_count="" i_memory_bytes="" i_quota_mb="" i_read_only="" i_linked_apps=""
+
+while IFS='=' read -r key value; do
+  [[ -z "$key" ]] && continue
+  case "$key" in
+    name)         i_name="$value" ;;
+    index_prefix) i_index_prefix="$value" ;;
+    host)         i_host="$value" ;;
+    port)         i_port="$value" ;;
+    index_count)  i_index_count="$value" ;;
+    memory_bytes) i_memory_bytes="$value" ;;
+    quota_mb)     i_quota_mb="$value" ;;
+    read_only)    i_read_only="$value" ;;
+    linked_apps)  i_linked_apps="$value" ;;
+  esac
+done < <(service_info "$name")
+
+printf '%-22s %s\n'              "Name:"        "$i_name"
+printf '%-22s %s\n'              "Index prefix:" "$i_index_prefix"
+printf '%-22s %s:%s\n'           "Host:"        "$i_host" "$i_port"
+printf '%-22s %s\n'              "Indexes:"     "$i_index_count"
+printf '%-22s %s bytes / %s MB\n' "Size:"       "$i_memory_bytes" "$i_quota_mb"
+printf '%-22s %s\n'              "Read-only:"   "$i_read_only"
+printf '%-22s %s\n'              "Linked apps:" "${i_linked_apps:-(none)}"

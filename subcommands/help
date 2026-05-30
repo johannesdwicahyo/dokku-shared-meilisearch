@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${DOKKU_TRACE:-}" == "1" ]] && set -x
+
+PLUGIN_ROOT="$(cd "$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")" && pwd)"
+# shellcheck source=config
+source "$PLUGIN_ROOT/config"
+
+cat <<EOF
+Usage: dokku $PLUGIN_COMMAND_PREFIX:<command> [args]
+
+Commands:
+  $PLUGIN_COMMAND_PREFIX:create <name>                 Create a tenant (two scoped API keys for the <name>-* index prefix).
+  $PLUGIN_COMMAND_PREFIX:destroy <name> -f             Delete the tenant's keys + all <name>-* indexes.
+  $PLUGIN_COMMAND_PREFIX:link <name> <app>             Set MEILISEARCH_URL + MEILISEARCH_API_KEY on <app>.
+  $PLUGIN_COMMAND_PREFIX:unlink <name> <app>           Remove those env vars from <app>.
+  $PLUGIN_COMMAND_PREFIX:list                          List all tenants on this host.
+  $PLUGIN_COMMAND_PREFIX:info <name>                   Indexes, size, quota, links, read-only state.
+  $PLUGIN_COMMAND_PREFIX:connect <name>                Open a shell in the container with the tenant key preset.
+  $PLUGIN_COMMAND_PREFIX:set-quota <name> <mb>         Set the per-tenant size cap (MB).
+  $PLUGIN_COMMAND_PREFIX:unset-quota <name>            Revert to the default cap.
+  $PLUGIN_COMMAND_PREFIX:check-quotas                  Run the quota sweep manually (auto-runs every 5 min).
+  $PLUGIN_COMMAND_PREFIX:export <name>                 [stretch goal — not in v0.1.0]
+  $PLUGIN_COMMAND_PREFIX:import <name>                 [stretch goal — not in v0.1.0]
+  $PLUGIN_COMMAND_PREFIX:help                          Show this help text.
+
+Tenant isolation: each tenant's API key is scoped to indexes matching
+"<name>-*". Every index your app creates MUST be named "<name>-..." or
+Meilisearch returns a 403. See README for client setup.
+EOF
