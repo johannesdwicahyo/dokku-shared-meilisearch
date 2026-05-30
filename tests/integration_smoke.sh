@@ -26,13 +26,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# curl as a given tenant key against an index path; echoes HTTP status code.
+# curl as a given tenant key against an index path; echoes HTTP status
+# code. Body is piped via stdin (`--data-binary @-`) rather than passed
+# as a CLI argument — the quota step generates a ~2 MB payload to push
+# the tenant over the byte cap, and that easily exceeds ARG_MAX when
+# embedded in a `docker exec` argv (`Argument list too long`).
 api_status() {
   local key="$1" method="$2" path="$3" body="${4:-}"
   if [[ -n "$body" ]]; then
-    docker exec -i "$C" curl -s -o /dev/null -w '%{http_code}' -X "$method" \
+    printf '%s' "$body" | docker exec -i "$C" curl -s -o /dev/null -w '%{http_code}' -X "$method" \
       -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
-      --data "$body" "http://localhost:7700${path}"
+      --data-binary @- "http://localhost:7700${path}"
   else
     docker exec -i "$C" curl -s -o /dev/null -w '%{http_code}' -X "$method" \
       -H "Authorization: Bearer $key" "http://localhost:7700${path}"
